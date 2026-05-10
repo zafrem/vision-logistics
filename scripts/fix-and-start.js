@@ -2,7 +2,6 @@
 
 import { spawn } from 'child_process';
 import { promises as fs } from 'fs';
-import { createServer } from 'net';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
@@ -45,10 +44,9 @@ function checkPort(port) {
 // Kill process on port
 async function killProcessOnPort(port) {
   try {
-    const { spawn } = await import('child_process');
-    const process = spawn('lsof', ['-ti', `:${port}`]);
-    
-    process.stdout.on('data', (data) => {
+    const proc = spawn('lsof', ['-ti', `:${port}`]);
+
+    proc.stdout.on('data', (data) => {
       const pids = data.toString().trim().split('\n');
       pids.forEach(pid => {
         if (pid) {
@@ -61,7 +59,7 @@ async function killProcessOnPort(port) {
         }
       });
     });
-    
+
     await new Promise(resolve => setTimeout(resolve, 2000));
   } catch (e) {
     // lsof might not be available, try alternative
@@ -143,147 +141,39 @@ async function createMissingAssets() {
   }
 }
 
-// Start fallback Redis server
+// Proper fallback Redis — spawns scripts/redis-fallback.js
 async function startFallbackRedis() {
-  return new Promise((resolve) => {
-    const store = new Map();
-    const server = createServer((socket) => {
-      socket.on('data', (data) => {
-        const commands = data.toString().trim().split('\n');
-        
-        for (const cmdLine of commands) {
-          const command = cmdLine.trim().split(' ');
-          const cmd = command[0].toUpperCase();
-          
-          let response = '';
-          
-          switch (cmd) {
-            case 'PING':
-              response = '+PONG\r\n';
-              break;
-            case 'SET':
-              if (command.length >= 3) {
-                store.set(command[1], command.slice(2).join(' '));
-                response = '+OK\r\n';
-              } else {
-                response = '-ERR wrong number of arguments\r\n';
-              }
-              break;
-            case 'GET':
-              if (command.length >= 2) {
-                const value = store.get(command[1]);
-                response = value ? `$${value.length}\r\n${value}\r\n` : '$-1\r\n';
-              } else {
-                response = '-ERR wrong number of arguments\r\n';
-              }
-              break;
-            case 'HSET':
-              if (command.length >= 4) {
-                const key = command[1];
-                const field = command[2];
-                const value = command.slice(3).join(' ');
-                if (!store.has(key)) store.set(key, new Map());
-                const hash = store.get(key);
-                if (hash instanceof Map) {
-                  hash.set(field, value);
-                  response = ':1\r\n';
-                } else {
-                  store.set(key, new Map([[field, value]]));
-                  response = ':1\r\n';
-                }
-              } else {
-                response = '-ERR wrong number of arguments\r\n';
-              }
-              break;
-            case 'HGETALL':
-              if (command.length >= 2) {
-                const hash = store.get(command[1]);
-                if (hash instanceof Map) {
-                  const entries = Array.from(hash.entries()).flat();
-                  response = `*${entries.length}\r\n`;
-                  entries.forEach(entry => {
-                    response += `$${entry.length}\r\n${entry}\r\n`;
-                  });
-                } else {
-                  response = '*0\r\n';
-                }
-              } else {
-                response = '-ERR wrong number of arguments\r\n';
-              }
-              break;
-            case 'ZADD':
-              if (command.length >= 4) {
-                const key = command[1];
-                const score = parseFloat(command[2]);
-                const member = command[3];
-                if (!store.has(key)) store.set(key, new Map());
-                const zset = store.get(key);
-                if (zset instanceof Map) {
-                  zset.set(member, score);
-                  response = ':1\r\n';
-                } else {
-                  store.set(key, new Map([[member, score]]));
-                  response = ':1\r\n';
-                }
-              } else {
-                response = '-ERR wrong number of arguments\r\n';
-              }
-              break;
-            case 'ZRANGEBYSCORE':
-            case 'ZRANGE':
-              if (command.length >= 4) {
-                const key = command[1];
-                const zset = store.get(key);
-                if (zset instanceof Map) {
-                  const entries = Array.from(zset.entries());
-                  response = `*${entries.length * 2}\r\n`;
-                  entries.forEach(([member, score]) => {
-                    response += `$${member.length}\r\n${member}\r\n`;
-                    response += `$${score.toString().length}\r\n${score}\r\n`;
-                  });
-                } else {
-                  response = '*0\r\n';
-                }
-              } else {
-                response = '-ERR wrong number of arguments\r\n';
-              }
-              break;
-            case 'EXPIRE':
-              response = ':1\r\n'; // Always succeed for simplicity
-              break;
-            case 'KEYS':
-              const pattern = command[1] || '*';
-              const keys = Array.from(store.keys()).filter(key => {
-                if (pattern === '*') return true;
-                return key.includes(pattern.replace('*', ''));
-              });
-              response = `*${keys.length}\r\n`;
-              keys.forEach(key => {
-                response += `$${key.length}\r\n${key}\r\n`;
-              });
-              break;
-            default:
-              response = '+OK\r\n'; // Simple fallback
-          }
-          
-          socket.write(response);
-        }
-      });
-      
-      socket.on('error', () => {
-        // Handle socket errors gracefully
-      });
+  return new Promise((resolve, reject) => {
+    const scriptPath = path.join(__dirname, 'redis-fallback.js');
+    const child = spawn('node', [scriptPath], {
+      env: { ...process.env, REDIS_FALLBACK_PORT: '6380' },
+      stdio: 'pipe'
     });
-    
-    server.listen(6380, () => {
-      success('✅ Fallback Redis started on port 6380');
-      resolve(server);
+
+    child.stdout.on('data', (data) => {
+      if (data.toString().includes('listening on port')) {
+        success('Fallback Redis started on port 6380');
+        resolve(child);
+      }
     });
-    
-    server.on('error', (err) => {
-      error(`Failed to start fallback Redis: ${err.message}`);
-      resolve(null);
+
+    child.stderr.on('data', (data) => {
+      error(`Fallback Redis error: ${data.toString()}`);
     });
+
+    child.on('exit', (code) => {
+      if (code !== 0) {
+        reject(new Error(`Fallback Redis exited with code ${code}`));
+      }
+    });
+
+    child.on('error', (err) => {
+      reject(new Error(`Failed to start fallback Redis: ${err.message}`));
+    });
+
+    setTimeout(() => {
+      reject(new Error('Fallback Redis startup timeout'));
+    }, 10000);
   });
 }
 
@@ -546,11 +436,11 @@ async function main() {
     
     if (redisServer) {
       try {
-        redisServer.close();
+        redisServer.kill('SIGTERM');
         log('Stopped fallback Redis', 'yellow');
       } catch (e) {}
     }
-    
+
     if (kafkaServer) {
       try {
         kafkaServer.close();

@@ -115,65 +115,36 @@ async function startDockerServices() {
   }
 }
 
-// Simple in-memory Redis-like server
+// Proper fallback Redis — spawns scripts/redis-fallback.js
 function startFallbackRedis(port = 6380) {
-  return new Promise((resolve) => {
-    const store = new Map();
-    const server = createServer((socket) => {
-      socket.on('data', (data) => {
-        const command = data.toString().trim().split(' ');
-        const cmd = command[0].toUpperCase();
-        
-        let response = '';
-        
-        switch (cmd) {
-          case 'PING':
-            response = '+PONG\r\n';
-            break;
-          case 'SET':
-            if (command.length >= 3) {
-              store.set(command[1], command[2]);
-              response = '+OK\r\n';
-            }
-            break;
-          case 'GET':
-            const value = store.get(command[1]);
-            response = value ? `$${value.length}\r\n${value}\r\n` : '$-1\r\n';
-            break;
-          case 'HSET':
-            if (command.length >= 4) {
-              const key = command[1];
-              if (!store.has(key)) store.set(key, new Map());
-              const hash = store.get(key);
-              hash.set(command[2], command[3]);
-              response = ':1\r\n';
-            }
-            break;
-          case 'HGETALL':
-            const hash = store.get(command[1]);
-            if (hash instanceof Map) {
-              const entries = Array.from(hash.entries()).flat();
-              response = `*${entries.length}\r\n`;
-              entries.forEach(entry => {
-                response += `$${entry.length}\r\n${entry}\r\n`;
-              });
-            } else {
-              response = '*0\r\n';
-            }
-            break;
-          default:
-            response = '+OK\r\n';
-        }
-        
-        socket.write(response);
-      });
+  return new Promise((resolve, reject) => {
+    const scriptPath = path.join(__dirname, 'redis-fallback.js');
+    const child = spawn('node', [scriptPath], {
+      env: { ...process.env, REDIS_FALLBACK_PORT: String(port) },
+      stdio: 'pipe'
     });
-    
-    server.listen(port, () => {
-      log(`✓ Fallback Redis started on port ${port}`);
-      services.set('fallback-redis', server);
-      resolve(server);
+
+    child.stdout.on('data', (data) => {
+      if (data.toString().includes('listening on port')) {
+        log(`Fallback Redis started on port ${port}`);
+        services.set('fallback-redis', child);
+        resolve(child);
+      }
     });
+
+    child.stderr.on('data', (data) => {
+      error(`Fallback Redis error: ${data.toString()}`);
+    });
+
+    child.on('exit', (code) => {
+      if (code !== 0) {
+        reject(new Error(`Fallback Redis exited with code ${code}`));
+      }
+    });
+
+    setTimeout(() => {
+      reject(new Error('Fallback Redis startup timeout'));
+    }, 10000);
   });
 }
 

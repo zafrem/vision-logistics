@@ -64,7 +64,7 @@ export class RedisClient {
       camera_id: data.camera_id,
       object_id: data.object_id,
       current_cell: data.current_cell === 'null' ? null : data.current_cell,
-      enter_ts_ms: data.enter_ts_ms ? parseInt(data.enter_ts_ms) : null,
+      enter_ts_ms: data.enter_ts_ms && data.enter_ts_ms !== 'null' ? parseInt(data.enter_ts_ms) : null,
       last_seen_ts_ms: parseInt(data.last_seen_ts_ms),
       accumulated_ms: parseInt(data.accumulated_ms),
     };
@@ -88,7 +88,7 @@ export class RedisClient {
 
   async updateCellDwell(collectorId: string, cameraId: string, cellId: string, objectId: string, dwellMs: number): Promise<void> {
     const key = this.getCellKey(collectorId, cameraId, cellId);
-    await this.client.zAdd(key, { score: dwellMs, value: objectId });
+    await this.client.zIncrBy(key, dwellMs, objectId);
     await this.client.expire(key, 86400);
   }
 
@@ -98,28 +98,32 @@ export class RedisClient {
   }
 
   async getCellStats(collectorId: string, cameraId: string, cellId?: string): Promise<CellStats[]> {
-    const pattern = cellId 
+    const pattern = cellId
       ? this.getCellKey(collectorId, cameraId, cellId)
       : `cell:${collectorId}:${cameraId}:*`;
-    
+
     const keys = await this.client.keys(pattern);
     const stats: CellStats[] = [];
 
     for (const key of keys) {
       const cellIdFromKey = key.split(':').slice(3).join(':');
-      const cellData = await this.client.hGetAll(key);
-      
-      if (Object.keys(cellData).length === 0) continue;
+      const members: Array<{ value: string; score: number }> = await this.client.zRangeWithScores(key, 0, -1);
+
+      if (members.length === 0) continue;
+
+      const dwellValues = members.map(m => m.score);
+      const totalDwell = dwellValues.reduce((sum, d) => sum + d, 0);
+      const objectCount = members.length;
 
       stats.push({
-        collector_id: cellData.collector_id || collectorId,
-        camera_id: cellData.camera_id || cameraId,
-        grid_cell_id: cellData.grid_cell_id || cellIdFromKey,
-        total_dwell_ms: parseInt(cellData.total_dwell_ms || '0'),
-        object_count: parseInt(cellData.object_count || '0'),
-        avg_dwell_ms: parseInt(cellData.avg_dwell_ms || '0'),
-        max_dwell_ms: parseInt(cellData.max_dwell_ms || '0'),
-        min_dwell_ms: parseInt(cellData.min_dwell_ms || '0'),
+        collector_id: collectorId,
+        camera_id: cameraId,
+        grid_cell_id: cellIdFromKey,
+        total_dwell_ms: Math.floor(totalDwell),
+        object_count: objectCount,
+        avg_dwell_ms: Math.floor(totalDwell / objectCount),
+        max_dwell_ms: Math.floor(Math.max(...dwellValues)),
+        min_dwell_ms: Math.floor(Math.min(...dwellValues)),
       });
     }
 
@@ -217,7 +221,7 @@ export class RedisClient {
             collector_id: event.collector_id,
             camera_id: event.camera_id,
             object_id: event.object_id,
-            grid_cell: event.grid_cell || 'unknown',
+            grid_cell: event.grid_cell_id || 'unknown',
             event_type: event.event_type,
             timestamp_ms: event.timestamp_ms.toString()
           };
@@ -251,7 +255,7 @@ export class RedisClient {
             camera_id: data.camera_id || cameraId,
             object_id: data.object_id,
             current_cell: data.current_cell || null,
-            enter_ts_ms: data.enter_ts_ms ? parseInt(data.enter_ts_ms) : null,
+            enter_ts_ms: data.enter_ts_ms && data.enter_ts_ms !== 'null' ? parseInt(data.enter_ts_ms) : null,
             last_seen_ts_ms: parseInt(data.last_seen_ts_ms),
             accumulated_ms: parseInt(data.accumulated_ms || '0'),
           };

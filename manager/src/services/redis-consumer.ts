@@ -2,7 +2,7 @@ import { createClient } from 'redis';
 import pino from 'pino';
 import { DwellProcessor } from './dwell-processor.js';
 import { RedisClient } from './redis-client.js';
-import type { NormalizedEvent } from '../types/detection.js';
+import type { NormalizedEvent } from '../types/index.js';
 
 const logger = pino({ name: 'redis-consumer' });
 
@@ -83,7 +83,7 @@ export class RedisConsumer {
 
       // Process events through dwell processor
       for (const event of events) {
-        await this.dwellProcessor.processDetectionEvent(event);
+        await this.dwellProcessor.processEvent(event);
         
         // Also add to recent events list for real-time log
         try {

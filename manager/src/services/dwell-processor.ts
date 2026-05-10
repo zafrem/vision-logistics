@@ -75,9 +75,27 @@ export class DwellProcessor {
     }
 
     const timeSinceLastSeen = now - currentState.last_seen_ts_ms;
-    
+
     if (timeSinceLastSeen > this.timeoutMs) {
       await this.handleTimeout(currentState, now);
+
+      // After a timeout the object is treated as re-entering fresh, regardless of cell
+      await this.addTimelineEntry(event, {
+        type: 'enter',
+        cell_id: event.grid_cell_id,
+        from_ts_ms: now,
+        to_ts_ms: null,
+      });
+
+      return {
+        collector_id: event.collector_id,
+        camera_id: event.camera_id,
+        object_id: event.object_id,
+        current_cell: event.grid_cell_id,
+        enter_ts_ms: now,
+        last_seen_ts_ms: now,
+        accumulated_ms: currentState.accumulated_ms,
+      };
     }
 
     if (currentState.current_cell === event.grid_cell_id) {

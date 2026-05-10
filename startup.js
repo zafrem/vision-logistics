@@ -128,51 +128,16 @@ class VisionLogisticsStarter {
 
   startFallbackRedis() {
     return new Promise((resolve, reject) => {
-      const redisProcess = spawn('node', ['-e', `
-        const net = require('net');
-        const server = net.createServer((socket) => {
-          let buffer = '';
-          socket.on('data', (data) => {
-            buffer += data.toString();
-            const commands = buffer.split('\\r\\n');
-            buffer = commands.pop() || '';
-            
-            for (const command of commands) {
-              if (!command.trim()) continue;
-              
-              const parts = command.split(' ');
-              const cmd = parts[0]?.toLowerCase();
-              
-              switch (cmd) {
-                case 'ping': socket.write('+PONG\\r\\n'); break;
-                case 'info': socket.write('$16\\r\\nredis_version:7.0\\r\\n'); break;
-                case 'select': socket.write('+OK\\r\\n'); break;
-                case 'hset': case 'hgetall': case 'zadd': case 'zrem': 
-                case 'zrange': case 'zrangebyscore': case 'keys': 
-                case 'lpush': case 'ltrim': case 'lrange': case 'xadd':
-                case 'expire': socket.write('+OK\\r\\n'); break;
-                default: socket.write('+OK\\r\\n'); break;
-              }
-            }
-          });
-          
-          socket.on('error', () => socket.destroy());
-        });
-        
-        server.listen(6380, () => {
-          console.log('Fallback Redis started on port 6380');
-        });
-        
-        process.on('SIGTERM', () => {
-          server.close();
-          process.exit(0);
-        });
-      `], { stdio: 'pipe' });
+      const scriptPath = path.join(__dirname, 'scripts', 'redis-fallback.js');
+      const redisProcess = spawn('node', [scriptPath], {
+        env: { ...process.env, REDIS_FALLBACK_PORT: '6380' },
+        stdio: 'pipe'
+      });
 
       redisProcess.stdout.on('data', (data) => {
-        if (data.toString().includes('Fallback Redis started')) {
+        if (data.toString().includes('listening on port')) {
           this.config.services.fallbackRedis.ready = true;
-          this.log('success', '✅ Fallback Redis started on port 6380');
+          this.log('success', 'Fallback Redis started on port 6380');
           resolve(redisProcess);
         }
       });
@@ -182,7 +147,7 @@ class VisionLogisticsStarter {
       });
 
       redisProcess.on('exit', (code) => {
-        if (code !== 0) {
+        if (code !== 0 && !this.isShuttingDown) {
           reject(new Error(`Redis process exited with code ${code}`));
         }
       });
@@ -417,21 +382,21 @@ ${colors.yellow}💡 Press Ctrl+C to stop all services${colors.reset}
       
       this.log('warn', `\n🛑 Received ${signal}, shutting down gracefully...`);
       
-      for (const [name, process] of this.processes) {
+      for (const [name, proc] of this.processes) {
         try {
-          process.kill('SIGTERM');
+          proc.kill('SIGTERM');
           this.log('info', `Stopped ${name}`);
         } catch (error) {
           // Process already stopped
         }
       }
-      
+
       await this.sleep(2000);
-      
+
       // Force kill if needed
-      for (const [, process] of this.processes) {
+      for (const [, proc] of this.processes) {
         try {
-          process.kill('SIGKILL');
+          proc.kill('SIGKILL');
         } catch (error) {
           // Process already stopped
         }
